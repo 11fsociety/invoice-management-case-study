@@ -61,5 +61,12 @@
     "tsx": "^4.23.11",
     "typescript": "^5"
   },
-  "packageManager": "pnpm@11.5.0"
+  "packageManager": "pnpm@11.5.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp",
+      "canvas"
+    ]
+  }
 }
