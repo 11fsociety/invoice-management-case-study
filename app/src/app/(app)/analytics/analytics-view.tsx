@@ -40,7 +40,7 @@ type AnalyticsPayload = {
   amountByVendor: Array<{ vendor_name: string; total: number }>;
   currencyBreakdown: Array<{ currency: string; count: number; total: number }>;
   latency: Array<{
-    mode: "text" | "vision";
+    mode: "pdf";
     avg_ms: number;
     p95_ms: number;
     count: number;
@@ -159,8 +159,8 @@ export function AnalyticsView(): React.ReactElement {
     return sum / deltaWeighted;
   })();
 
-  const visionRow = data.latency.find((l) => l.mode === "vision");
-  const showVisionEmptyChip = !visionRow || visionRow.count === 0;
+  const pdfRow = data.latency.find((l) => l.mode === "pdf");
+  const showLatencyEmptyChip = !pdfRow || pdfRow.count === 0;
 
   const decisionPieData = data.decisionsByBucket.map((d) => ({
     name: d.bucket,
@@ -173,7 +173,7 @@ export function AnalyticsView(): React.ReactElement {
     value: c.count,
   }));
 
-  const latencyData = (["text", "vision"] as const).map((mode) => {
+  const latencyData = (["pdf"] as const).map((mode) => {
     const row = data.latency.find((l) => l.mode === mode);
     return {
       mode,
@@ -375,12 +375,12 @@ export function AnalyticsView(): React.ReactElement {
         {/* Chart 5 - Latency by mode */}
         <Card>
           <CardHeader>
-            <CardTitle>Extraction latency by mode</CardTitle>
+            <CardTitle>Extraction latency</CardTitle>
             <CardDescription>
-              Avg and p95 latency, text vs vision.
-              {showVisionEmptyChip && (
+              Avg and p95 latency across all PDF runs.
+              {showLatencyEmptyChip && (
                 <span className="ml-2 inline-flex items-center rounded-full bg-[var(--muted)] px-2 py-0.5 text-[10px] font-medium text-[var(--muted-foreground)]">
-                  no vision-mode runs yet
+                  no runs yet
                 </span>
               )}
             </CardDescription>

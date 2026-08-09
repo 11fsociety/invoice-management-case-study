@@ -29,7 +29,7 @@ const SAMPLES_DIR =
   "D:\\codezzz\\Claude\\zamp-asa\\sample-invoices";
 
 const PO_XLSX = join(SAMPLES_DIR, "po_master.xlsx");
-const INVOICE_COUNT = 20;
+const INVOICE_COUNT = Number(process.env.INVOICE_COUNT ?? 29);
 const SLEEP_MS = 400;
 
 const REGIONAL_MODEL = "us.anthropic.claude-opus-4-7";
@@ -122,30 +122,30 @@ async function seedPoSheetIfNeeded(
 ): Promise<void> {
   const { db, schema } = drizzleBits;
 
-  const existing = await db.select({ id: schema.poRows.id }).from(schema.poRows).limit(1);
-  if (existing.length > 0) {
-    console.log("[po] po_rows already populated, skipping xlsx upload/parse");
-    return;
-  }
-
   if (!existsSync(PO_XLSX)) {
     throw new Error(`PO master xlsx not found at ${PO_XLSX}`);
   }
 
   const xlsxBytes = readFileSync(PO_XLSX);
-  const storagePath = `sheets/${randomUUID()}.xlsx`;
 
-  const { error: upErr } = await supabase.storage
-    .from("po-sheets")
-    .upload(storagePath, xlsxBytes, {
-      contentType:
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      upsert: false,
-    });
-  if (upErr) {
-    throw new Error(`po-sheets upload failed: ${upErr.message}`);
+  // Upload the current xlsx snapshot only if po_rows table is empty.
+  const existing = await db.select({ id: schema.poRows.id }).from(schema.poRows).limit(1);
+  if (existing.length === 0) {
+    const storagePath = `sheets/${randomUUID()}.xlsx`;
+    const { error: upErr } = await supabase.storage
+      .from("po-sheets")
+      .upload(storagePath, xlsxBytes, {
+        contentType:
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        upsert: false,
+      });
+    if (upErr) {
+      throw new Error(`po-sheets upload failed: ${upErr.message}`);
+    }
+    console.log(`[po] uploaded ${basename(PO_XLSX)} -> po-sheets/${storagePath}`);
+  } else {
+    console.log("[po] po_rows already has data; will add any missing rows from xlsx");
   }
-  console.log(`[po] uploaded ${basename(PO_XLSX)} -> po-sheets/${storagePath}`);
 
   const wb = XLSX.read(xlsxBytes, { type: "buffer", cellDates: true });
   const sheetName = wb.SheetNames[0];

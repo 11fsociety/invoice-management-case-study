@@ -71,6 +71,8 @@ export const invoiceExtractions = pgTable("invoice_extractions", {
   extractedJson: jsonb("extracted_json").notNull(),
   lineItemsRaw: text("line_items_raw"),
   lineItems: jsonb("line_items"),
+  documentType: text("document_type"),
+  referencesInvoiceNumber: text("references_invoice_number"),
   providerUsed: text("provider_used"),
   modelUsed: text("model_used"),
   tokensIn: integer("tokens_in"),
@@ -93,6 +95,11 @@ export const decisions = pgTable("decisions", {
   currencyOk: boolean("currency_ok"),
   duplicateOf: uuid("duplicate_of").references(() => invoiceRuns.id),
   duplicateConfidence: numeric("duplicate_confidence", { precision: 4, scale: 3 }),
+  cumulativeApprovedAmount: numeric("cumulative_approved_amount", { precision: 14, scale: 2 }),
+  remainingPoBalance: numeric("remaining_po_balance", { precision: 14, scale: 2 }),
+  itemMatchScore: numeric("item_match_score", { precision: 4, scale: 3 }),
+  documentType: text("document_type"),
+  creditNoteLinkedRunId: uuid("credit_note_linked_run_id").references(() => invoiceRuns.id),
   decidedAt: timestamp("decided_at", { withTimezone: true }).defaultNow(),
 });
 

@@ -5,8 +5,6 @@ import { db } from "@/lib/db";
 import { invoiceRuns, invoiceExtractions } from "@/lib/db/schema";
 import { createServiceClient } from "@/lib/supabase/server";
 import { buildPrompt } from "./prompt";
-import { extractText } from "@/lib/pdf/text";
-import { renderToPngs } from "@/lib/pdf/vision";
 import { emit } from "./sse";
 
 const BEDROCK_MODEL =
@@ -35,6 +33,12 @@ function isThrottling(err: unknown): boolean {
   );
 }
 
+/**
+ * Send the WHOLE PDF directly to Bedrock Opus 4.7 as a single document content
+ * block. No text extraction, no page rendering, no vision fallback. The AI SDK
+ * Bedrock adapter maps a `file` content part with `mediaType: 'application/pdf'`
+ * to a Converse-API `document` block with base64 bytes.
+ */
 export async function runExtraction(runId: string): Promise<void> {
   const runs = await db.select().from(invoiceRuns).where(eq(invoiceRuns.id, runId));
   const run = runs[0];
@@ -42,7 +46,7 @@ export async function runExtraction(runId: string): Promise<void> {
 
   emit(runId, "extraction_started", { runId });
 
-  // 1. Download the PDF.
+  // 1. Download the PDF via the service-role Supabase client.
   const supabase = createServiceClient();
   const { data: fileBlob, error: dlErr } = await supabase.storage
     .from("invoices")
@@ -56,53 +60,16 @@ export async function runExtraction(runId: string): Promise<void> {
     throw new Error(`failed to download invoice: ${dlErr?.message ?? "unknown"}`);
   }
   const pdfBuf = Buffer.from(await fileBlob.arrayBuffer());
+  const pdfBase64 = pdfBuf.toString("base64");
 
-  // 2. Text yield probe.
-  let mode: "text" | "vision" = "text";
-  let extractedText = "";
-  let images: Buffer[] = [];
-  try {
-    const t = await extractText(pdfBuf);
-    emit(runId, "text_extracted", { chars: t.chars, pages: t.pages });
-    if (t.charsPerPage >= 100) {
-      extractedText = t.text;
-      mode = "text";
-    } else {
-      mode = "vision";
-    }
-  } catch (err) {
-    emit(runId, "text_error", { message: (err as Error).message });
-    mode = "vision";
-  }
-
-  if (mode === "vision") {
-    emit(runId, "vision_started", {});
-    try {
-      images = await renderToPngs(pdfBuf);
-    } catch (err) {
-      await db
-        .update(invoiceRuns)
-        .set({ status: "failed" })
-        .where(eq(invoiceRuns.id, runId));
-      emit(runId, "extraction_failed", { reason: "render_failed" });
-      throw new Error(`failed to render PDF: ${(err as Error).message}`);
-    }
-    if (images.length === 0) {
-      await db
-        .update(invoiceRuns)
-        .set({ status: "failed" })
-        .where(eq(invoiceRuns.id, runId));
-      emit(runId, "extraction_failed", { reason: "no_pages" });
-      throw new Error("no pages rendered");
-    }
-  }
+  emit(runId, "pdf_downloaded", { bytes: pdfBuf.byteLength });
 
   await db
     .update(invoiceRuns)
-    .set({ status: "extracting", extractionMode: mode })
+    .set({ status: "extracting", extractionMode: "pdf" })
     .where(eq(invoiceRuns.id, runId));
 
-  // 3. Build the prompt + schema.
+  // 2. Build the prompt + schema.
   const { system, zodSchema } = await buildPrompt();
 
   const bedrock = createAmazonBedrock({
@@ -111,22 +78,28 @@ export async function runExtraction(runId: string): Promise<void> {
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ?? "",
   });
 
-  // Assemble the initial user message.
-  const initialUserContent =
-    mode === "text"
-      ? [{ type: "text" as const, text: extractedText }]
-      : images.map((img) => ({
-          type: "image" as const,
-          image: img,
-        }));
-
+  // 3. Assemble the single user message: PDF file part + inline instruction.
   const baseMessages: ModelMessage[] = [
-    { role: "user", content: initialUserContent },
+    {
+      role: "user",
+      content: [
+        {
+          type: "file",
+          data: pdfBase64,
+          mediaType: "application/pdf",
+          filename: run.filename,
+        },
+        {
+          type: "text",
+          text: "Extract the specified fields from the attached invoice PDF, returning ONLY valid JSON matching the given schema.",
+        },
+      ],
+    },
   ];
 
   const t0 = Date.now();
 
-  emit(runId, "llm_called", { mode });
+  emit(runId, "llm_called", { mode: "pdf" });
 
   let object: Record<string, unknown> | null = null;
   let usage: { inputTokens?: number; outputTokens?: number } = {};
@@ -209,6 +182,12 @@ export async function runExtraction(runId: string): Promise<void> {
       ? (object.line_items_raw as string)
       : null;
   const lineItems = Array.isArray(object.line_items) ? object.line_items : null;
+  const documentType =
+    typeof object.document_type === "string" ? (object.document_type as string) : null;
+  const referencesInvoiceNumber =
+    typeof object.references_invoice_number === "string"
+      ? (object.references_invoice_number as string)
+      : null;
 
   await db
     .insert(invoiceExtractions)
@@ -217,6 +196,8 @@ export async function runExtraction(runId: string): Promise<void> {
       extractedJson: object,
       lineItemsRaw,
       lineItems,
+      documentType,
+      referencesInvoiceNumber,
       providerUsed: "bedrock",
       modelUsed: BEDROCK_MODEL,
       tokensIn: usage.inputTokens ?? null,
@@ -230,6 +211,8 @@ export async function runExtraction(runId: string): Promise<void> {
         extractedJson: object,
         lineItemsRaw,
         lineItems,
+        documentType,
+        referencesInvoiceNumber,
         providerUsed: "bedrock",
         modelUsed: BEDROCK_MODEL,
         tokensIn: usage.inputTokens ?? null,

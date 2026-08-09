@@ -16,6 +16,11 @@ export type DecisionRow = {
   matchedPoId: string | null;
   duplicateOf: string | null;
   duplicateConfidence: string | number | null;
+  itemMatchScore?: string | number | null;
+  cumulativeApprovedAmount?: string | number | null;
+  remainingPoBalance?: string | number | null;
+  creditNoteLinkedRunId?: string | null;
+  documentType?: string | null;
 };
 
 type CheckStatus = "PASS" | "FAIL" | "N/A";
@@ -215,6 +220,34 @@ export function DecisionExplanation({
             </li>
           )}
         </ul>
+
+        {decision.itemMatchScore !== null &&
+          decision.itemMatchScore !== undefined && (
+            <div className="pt-1 text-xs text-[var(--muted-foreground)]">
+              Line item match: {(Number(decision.itemMatchScore) * 100).toFixed(0)}%
+              {" "}(
+              {Number(decision.itemMatchScore) >= 0.7
+                ? "PASS"
+                : Number(decision.itemMatchScore) >= 0.4
+                  ? "AMBIGUOUS"
+                  : "FAIL"}
+              )
+            </div>
+          )}
+        {decision.cumulativeApprovedAmount !== null &&
+          decision.cumulativeApprovedAmount !== undefined && (
+            <div className="pt-1 text-xs text-[var(--muted-foreground)]">
+              Prior approved on same PO: {Number(decision.cumulativeApprovedAmount).toFixed(2)}
+              {decision.remainingPoBalance !== null &&
+                decision.remainingPoBalance !== undefined &&
+                `, Remaining after this: ${Number(decision.remainingPoBalance).toFixed(2)}`}
+            </div>
+          )}
+        {decision.creditNoteLinkedRunId && (
+          <div className="pt-1 text-xs text-[var(--muted-foreground)]">
+            Credit note linked to earlier invoice run
+          </div>
+        )}
 
         {decision.reason && (
           <div className="pt-2">

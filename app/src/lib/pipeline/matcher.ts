@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { eq, sql, and, ne } from "drizzle-orm";
 import { db } from "@/lib/db";
 import {
   invoiceExtractions,
@@ -8,6 +8,8 @@ import {
   settings,
 } from "@/lib/db/schema";
 import { emit } from "./sse";
+import { matchLineItems } from "./item-normalizer";
+import { normalizeVendorId, normalizeVendorName } from "./vendor-normalizer";
 
 type Extraction = Record<string, unknown>;
 
@@ -88,6 +90,16 @@ export function nameSimilarity(a: string | null, b: string | null): number {
   return 1 - levenshtein(A, B) / max;
 }
 
+function normalizedNameSimilarity(a: string | null, b: string | null): number {
+  const A = normalizeVendorName(a);
+  const B = normalizeVendorName(b);
+  if (!A || !B) return 0;
+  if (A === B) return 1;
+  const max = Math.max(A.length, B.length);
+  if (max === 0) return 1;
+  return 1 - levenshtein(A, B) / max;
+}
+
 async function loadSetting<T>(key: string, fallback: T): Promise<T> {
   const rows = await db.select().from(settings).where(eq(settings.key, key));
   if (rows.length === 0) return fallback;
@@ -99,13 +111,31 @@ async function loadSetting<T>(key: string, fallback: T): Promise<T> {
 export async function runPass1(runId: string): Promise<void> {
   emit(runId, "matching_started", {});
 
+  // Fail-fast: if the invoice run itself is 'failed' (extraction crashed), REJECT.
+  const runRow = await db
+    .select()
+    .from(invoiceRuns)
+    .where(eq(invoiceRuns.id, runId));
+  if (runRow.length > 0 && runRow[0].status === "failed") {
+    await upsertDecision(runId, {
+      pass1Decision: "REJECTED",
+      finalDecision: "REJECTED",
+      reason: "unparseable extraction",
+    });
+    await db
+      .update(invoiceRuns)
+      .set({ status: "matched" })
+      .where(eq(invoiceRuns.id, runId));
+    emit(runId, "decision", { decision: "REJECTED" });
+    return;
+  }
+
   const extRows = await db
     .select()
     .from(invoiceExtractions)
     .where(eq(invoiceExtractions.runId, runId));
   const extRow = extRows[0];
   if (!extRow) {
-    // Terminal - no extraction found. Insert REJECTED with reason.
     await upsertDecision(runId, {
       pass1Decision: "REJECTED",
       finalDecision: "REJECTED",
@@ -131,11 +161,15 @@ export async function runPass1(runId: string): Promise<void> {
   const poNumber = toStringOrNull(extraction.po_number);
   const vendorName = toStringOrNull(extraction.vendor_name);
   const vendorId = toStringOrNull(extraction.vendor_id);
+  const gstNumber = toStringOrNull(extraction.gst_number);
   const currency = toStringOrNull(extraction.currency);
   const invoiceTotal = toNumberOrNull(extraction.invoice_total);
   const invoiceDate = parseDate(extraction.invoice_date);
+  const documentTypeRaw = toStringOrNull(extraction.document_type);
+  const referencesInvoiceNumber = toStringOrNull(
+    extraction.references_invoice_number
+  );
 
-  // Diagnostics we build up.
   const diagnostics: {
     matchedPoId: string | null;
     amountDelta: number | null;
@@ -143,6 +177,11 @@ export async function runPass1(runId: string): Promise<void> {
     dateDeltaDays: number | null;
     vendorMatchScore: number | null;
     currencyOk: boolean | null;
+    itemMatchScore: number | null;
+    cumulativeApprovedAmount: number | null;
+    remainingPoBalance: number | null;
+    documentType: string | null;
+    creditNoteLinkedRunId: string | null;
   } = {
     matchedPoId: null,
     amountDelta: null,
@@ -150,7 +189,76 @@ export async function runPass1(runId: string): Promise<void> {
     dateDeltaDays: null,
     vendorMatchScore: null,
     currencyOk: null,
+    itemMatchScore: null,
+    cumulativeApprovedAmount: null,
+    remainingPoBalance: null,
+    documentType: null,
+    creditNoteLinkedRunId: null,
   };
+
+  // --- EDGE 5: Credit-note branch. ---
+  const isCreditNote =
+    documentTypeRaw?.toUpperCase() === "CREDIT_NOTE" ||
+    (invoiceTotal !== null && invoiceTotal < 0);
+  if (isCreditNote) {
+    diagnostics.documentType = "CREDIT_NOTE";
+
+    let linkedRunId: string | null = null;
+    let linkedInvoiceTotal: number | null = null;
+    if (referencesInvoiceNumber) {
+      // Try to find an existing invoice by extracted invoice_number OR by filename.
+      const refTrim = referencesInvoiceNumber.trim();
+      const linkedRows = await db
+        .select({
+          runId: invoiceRuns.id,
+          filename: invoiceRuns.filename,
+          extractedJson: invoiceExtractions.extractedJson,
+        })
+        .from(invoiceRuns)
+        .leftJoin(
+          invoiceExtractions,
+          eq(invoiceExtractions.runId, invoiceRuns.id)
+        )
+        .where(
+          sql`${invoiceRuns.id} <> ${runId} AND (
+                ${invoiceRuns.filename} ILIKE ${"%" + refTrim + "%"} OR
+                ${invoiceExtractions.extractedJson}->>'invoice_number' = ${refTrim}
+              )`
+        );
+      if (linkedRows.length > 0) {
+        linkedRunId = linkedRows[0].runId;
+        const j = (linkedRows[0].extractedJson ?? {}) as Record<string, unknown>;
+        linkedInvoiceTotal = toNumberOrNull(j.invoice_total);
+      }
+    }
+    diagnostics.creditNoteLinkedRunId = linkedRunId;
+
+    const adjustment = invoiceTotal !== null ? Math.abs(invoiceTotal) : 0;
+    let reason: string;
+    if (linkedRunId) {
+      const adjustedPayable =
+        linkedInvoiceTotal !== null && invoiceTotal !== null
+          ? linkedInvoiceTotal + invoiceTotal
+          : null;
+      reason = `Credit note (adjustment: ${adjustment}) linked to invoice ${referencesInvoiceNumber}. Adjusted payable: ${adjustedPayable ?? "n/a"}. Auditor review required.`;
+    } else {
+      reason = `Credit note could not be linked to an existing invoice or PO.`;
+    }
+
+    await upsertDecision(runId, {
+      pass1Decision: "FLAGGED_FOR_REVIEW",
+      finalDecision: "FLAGGED_FOR_REVIEW",
+      reason,
+      documentType: "CREDIT_NOTE",
+      creditNoteLinkedRunId: linkedRunId,
+    });
+    await db
+      .update(invoiceRuns)
+      .set({ status: "matched" })
+      .where(eq(invoiceRuns.id, runId));
+    emit(runId, "decision", { decision: "FLAGGED_FOR_REVIEW", reason });
+    return;
+  }
 
   // Check 1: PO number present.
   if (!poNumber) {
@@ -180,7 +288,6 @@ export async function runPass1(runId: string): Promise<void> {
     diagnostics.dateDeltaDays = daysBetween(invoiceDate, poDate);
   }
 
-  // Compute all diagnostics upfront so they're saved even on early exit.
   if (invoiceTotal !== null && Number.isFinite(poAmount) && poAmount !== 0) {
     diagnostics.amountDelta = Number((invoiceTotal - poAmount).toFixed(2));
     diagnostics.amountDeltaPct = Number(
@@ -188,18 +295,48 @@ export async function runPass1(runId: string): Promise<void> {
     );
   }
   diagnostics.currencyOk =
-    currency !== null && (po.currency ?? "").trim().toUpperCase() === currency.trim().toUpperCase();
+    currency !== null &&
+    (po.currency ?? "").trim().toUpperCase() === currency.trim().toUpperCase();
 
-  // Vendor score.
+  // --- EDGE 2: Vendor identity check (authoritative id first). ---
+  const invAuthId = normalizeVendorId(gstNumber ?? vendorId);
+  const poAuthId = normalizeVendorId(po.vendorId);
   let vendorScore: number | null = null;
-  if (vendorId && po.vendorId && vendorId.trim() === po.vendorId.trim()) {
+  if (invAuthId && poAuthId && invAuthId !== poAuthId) {
+    // Authoritative id mismatch - FLAG.
+    diagnostics.vendorMatchScore = 0;
+    await finish({
+      decision: "FLAGGED_FOR_REVIEW",
+      reason: `Vendor identity mismatch: invoice vendor "${vendorName ?? "?"}" (id: ${invAuthId}) does not match PO vendor "${po.vendorName}" (id: ${poAuthId}).`,
+    });
+    return;
+  } else if (invAuthId && poAuthId && invAuthId === poAuthId) {
     vendorScore = 1;
   } else {
-    vendorScore = Number(nameSimilarity(vendorName, po.vendorName).toFixed(3));
+    vendorScore = Number(
+      normalizedNameSimilarity(vendorName, po.vendorName).toFixed(3)
+    );
   }
   diagnostics.vendorMatchScore = vendorScore;
 
-  // Check 3: date order.
+  if (vendorScore < vendorThreshold) {
+    await finish({
+      decision: "FLAGGED_FOR_REVIEW",
+      reason: `vendor mismatch: ${vendorName ?? "?"} vs ${po.vendorName} (similarity: ${vendorScore.toFixed(2)}, threshold: ${vendorThreshold})`,
+    });
+    return;
+  }
+
+  // Check: currency.
+  if (currency && po.currency && !diagnostics.currencyOk) {
+    await finish({
+      decision: "FLAGGED_FOR_REVIEW",
+      reason: `currency mismatch: invoice ${currency} vs PO ${po.currency ?? "?"}`,
+    });
+    return;
+  }
+
+  // Check: date.
   if (invoiceDate && poDate && invoiceDate < poDate) {
     await finish({
       decision: "FLAGGED_FOR_REVIEW",
@@ -208,28 +345,31 @@ export async function runPass1(runId: string): Promise<void> {
     return;
   }
 
-  // Check 4: vendor identity.
-  const vendorMatch =
-    (vendorId && po.vendorId && vendorId.trim() === po.vendorId.trim()) ||
-    (vendorScore !== null && vendorScore >= vendorThreshold);
-  if (!vendorMatch) {
-    await finish({
-      decision: "FLAGGED_FOR_REVIEW",
-      reason: `vendor mismatch: ${vendorName ?? "?"} vs ${po.vendorName}`,
-    });
-    return;
+  // --- EDGE 3: Line-item match. ---
+  const lineItemsForMatch = (Array.isArray(extraction.line_items)
+    ? (extraction.line_items as Array<{ description?: string | null }>)
+    : null);
+  const itemResult = matchLineItems(lineItemsForMatch, po.lineItemSummary);
+  diagnostics.itemMatchScore = Number(itemResult.score.toFixed(3));
+
+  if (itemResult.pairs.length > 0) {
+    if (itemResult.score < 0.4) {
+      await finish({
+        decision: "FLAGGED_FOR_REVIEW",
+        reason: `Invoice line items do not match PO items (similarity: ${itemResult.score.toFixed(2)}).`,
+      });
+      return;
+    }
+    if (itemResult.score < 0.7) {
+      await finish({
+        decision: "FLAGGED_FOR_REVIEW",
+        reason: `Line-item descriptions could not be confidently matched (similarity: ${itemResult.score.toFixed(2)}).`,
+      });
+      return;
+    }
   }
 
-  // Check 5: currency.
-  if (!diagnostics.currencyOk) {
-    await finish({
-      decision: "FLAGGED_FOR_REVIEW",
-      reason: `currency mismatch: invoice ${currency ?? "?"} vs PO ${po.currency ?? "?"}`,
-    });
-    return;
-  }
-
-  // Check 6: amount tolerance.
+  // Check: amount tolerance.
   if (
     invoiceTotal === null ||
     !Number.isFinite(poAmount) ||
@@ -242,11 +382,62 @@ export async function runPass1(runId: string): Promise<void> {
     });
     return;
   }
-  const absPct = Math.abs(diagnostics.amountDeltaPct);
-  if (absPct > tolerancePct) {
+  // Only flag OVER-tolerance here. Under-billing (partial invoicing) is
+  // handled by the cumulative PO-balance check below.
+  if (diagnostics.amountDeltaPct > tolerancePct) {
     await finish({
       decision: "FLAGGED_FOR_REVIEW",
-      reason: `amount outside tolerance: ${invoiceTotal} vs ${poAmount} (${absPct.toFixed(2)}% delta)`,
+      reason: `amount outside tolerance: ${invoiceTotal} vs ${poAmount} (${diagnostics.amountDeltaPct.toFixed(2)}% delta)`,
+    });
+    return;
+  }
+
+  // --- EDGE 1: Cumulative PO balance. ---
+  // Skip if this invoice looks like a duplicate of an existing APPROVED one on
+  // the same PO (same amount within 0.1%). Duplicates are Pass 2's job.
+  const priorSameRuns = await db
+    .select({
+      runId: decisions.runId,
+      total: sql<string>`(${invoiceExtractions.extractedJson}->>'invoice_total')`,
+    })
+    .from(decisions)
+    .leftJoin(
+      invoiceExtractions,
+      eq(invoiceExtractions.runId, decisions.runId)
+    )
+    .where(
+      and(
+        eq(decisions.matchedPoId, po.id),
+        eq(decisions.finalDecision, "APPROVED"),
+        ne(decisions.runId, runId)
+      )
+    );
+
+  let prior = 0;
+  let looksLikeDuplicate = false;
+  for (const r of priorSameRuns) {
+    const t = r.total !== null ? Number(r.total) : 0;
+    prior += t;
+    if (t !== 0 && invoiceTotal !== 0) {
+      const denom = Math.max(Math.abs(t), Math.abs(invoiceTotal));
+      if (denom > 0 && Math.abs(t - invoiceTotal) / denom <= 0.001) {
+        looksLikeDuplicate = true;
+      }
+    }
+  }
+  const combined = prior + invoiceTotal;
+  diagnostics.cumulativeApprovedAmount = Number(prior.toFixed(2));
+  diagnostics.remainingPoBalance = Number(
+    (poAmount - prior - invoiceTotal).toFixed(2)
+  );
+
+  if (
+    !looksLikeDuplicate &&
+    combined > poAmount * (1 + tolerancePct / 100)
+  ) {
+    await finish({
+      decision: "FLAGGED_FOR_REVIEW",
+      reason: `Cumulative invoice amount (${combined.toFixed(2)}) exceeds PO balance (${poAmount}) with tolerance ${tolerancePct}%.`,
     });
     return;
   }
@@ -277,6 +468,20 @@ export async function runPass1(runId: string): Promise<void> {
           ? null
           : diagnostics.vendorMatchScore.toFixed(3),
       currencyOk: diagnostics.currencyOk,
+      itemMatchScore:
+        diagnostics.itemMatchScore === null
+          ? null
+          : diagnostics.itemMatchScore.toFixed(3),
+      cumulativeApprovedAmount:
+        diagnostics.cumulativeApprovedAmount === null
+          ? null
+          : diagnostics.cumulativeApprovedAmount.toFixed(2),
+      remainingPoBalance:
+        diagnostics.remainingPoBalance === null
+          ? null
+          : diagnostics.remainingPoBalance.toFixed(2),
+      documentType: diagnostics.documentType,
+      creditNoteLinkedRunId: diagnostics.creditNoteLinkedRunId,
     });
     await db
       .update(invoiceRuns)
@@ -298,6 +503,11 @@ type DecisionUpdate = {
   currencyOk?: boolean | null;
   duplicateOf?: string | null;
   duplicateConfidence?: string | null;
+  itemMatchScore?: string | null;
+  cumulativeApprovedAmount?: string | null;
+  remainingPoBalance?: string | null;
+  documentType?: string | null;
+  creditNoteLinkedRunId?: string | null;
 };
 
 async function upsertDecision(
@@ -317,6 +527,11 @@ async function upsertDecision(
     currencyOk: values.currencyOk ?? null,
     duplicateOf: values.duplicateOf ?? null,
     duplicateConfidence: values.duplicateConfidence ?? null,
+    itemMatchScore: values.itemMatchScore ?? null,
+    cumulativeApprovedAmount: values.cumulativeApprovedAmount ?? null,
+    remainingPoBalance: values.remainingPoBalance ?? null,
+    documentType: values.documentType ?? null,
+    creditNoteLinkedRunId: values.creditNoteLinkedRunId ?? null,
     decidedAt: sql`now()`,
   } as const;
 
@@ -337,6 +552,11 @@ async function upsertDecision(
         currencyOk: values.currencyOk ?? null,
         duplicateOf: values.duplicateOf ?? null,
         duplicateConfidence: values.duplicateConfidence ?? null,
+        itemMatchScore: values.itemMatchScore ?? null,
+        cumulativeApprovedAmount: values.cumulativeApprovedAmount ?? null,
+        remainingPoBalance: values.remainingPoBalance ?? null,
+        documentType: values.documentType ?? null,
+        creditNoteLinkedRunId: values.creditNoteLinkedRunId ?? null,
         decidedAt: sql`now()`,
       },
     });

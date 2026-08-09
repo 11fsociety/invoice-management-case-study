@@ -4,10 +4,10 @@ import {
   decisions,
   invoiceExtractions,
   invoiceRuns,
-  settings,
 } from "@/lib/db/schema";
 import { emit } from "./sse";
-import { nameSimilarity } from "./matcher";
+import { normalizeVendorId, normalizeVendorName } from "./vendor-normalizer";
+import { levenshtein } from "./matcher";
 
 type ApprovedInvoice = {
   runId: string;
@@ -43,28 +43,25 @@ function toNumberOrNull(v: unknown): number | null {
   return null;
 }
 
-async function loadThreshold(): Promise<number> {
-  const rows = await db
-    .select()
-    .from(settings)
-    .where(eq(settings.key, "duplicate_confidence_threshold"));
-  if (rows.length === 0) return 0.75;
-  const v = rows[0].value;
-  if (typeof v === "number") return v;
-  if (typeof v === "string") return Number(v) || 0.75;
-  return 0.75;
+function vendorNameSim(a: string | null, b: string | null): number {
+  const A = normalizeVendorName(a);
+  const B = normalizeVendorName(b);
+  if (!A || !B) return 0;
+  if (A === B) return 1;
+  const max = Math.max(A.length, B.length);
+  if (max === 0) return 1;
+  return 1 - levenshtein(A, B) / max;
 }
 
 /**
- * Weighted duplicate confidence per PRD 5.4.
+ * Backwards-compatible helper: weighted confidence used elsewhere (e.g. tests
+ * or component displays). Kept for API stability.
  */
 export function duplicateConfidence(
   a: ApprovedInvoice,
   b: ApprovedInvoice
 ): number {
   let score = 0;
-
-  // Invoice number - 0.40 if trim-lower-equal (both non-null)
   if (
     a.invoiceNumber &&
     b.invoiceNumber &&
@@ -72,16 +69,12 @@ export function duplicateConfidence(
   ) {
     score += 0.4;
   }
-
-  // Vendor - 0.20 if exact vendor_id OR fuzzy name >= 0.90
   const vendorIdMatch =
     !!a.vendorId &&
     !!b.vendorId &&
     a.vendorId.trim() === b.vendorId.trim();
-  const vendorNameMatch = nameSimilarity(a.vendorName, b.vendorName) >= 0.9;
+  const vendorNameMatch = vendorNameSim(a.vendorName, b.vendorName) >= 0.9;
   if (vendorIdMatch || vendorNameMatch) score += 0.2;
-
-  // Amount - 0.20 if within 0.5%
   if (
     a.amount !== null &&
     b.amount !== null &&
@@ -93,8 +86,6 @@ export function duplicateConfidence(
       score += 0.2;
     }
   }
-
-  // PO number - 0.10
   if (
     a.poNumber &&
     b.poNumber &&
@@ -102,13 +93,13 @@ export function duplicateConfidence(
   ) {
     score += 0.1;
   }
-
-  // Date - 0.05
-  if (a.invoiceDate && b.invoiceDate && a.invoiceDate.trim() === b.invoiceDate.trim()) {
+  if (
+    a.invoiceDate &&
+    b.invoiceDate &&
+    a.invoiceDate.trim() === b.invoiceDate.trim()
+  ) {
     score += 0.05;
   }
-
-  // Currency - 0.05
   if (
     a.currency &&
     b.currency &&
@@ -116,14 +107,15 @@ export function duplicateConfidence(
   ) {
     score += 0.05;
   }
-
   return Number(score.toFixed(3));
 }
 
-export async function runPass2Global(): Promise<{ retagCount: number }> {
-  const threshold = await loadThreshold();
-
-  // Join decisions + extractions + runs for APPROVED rows only.
+export async function runPass2Global(): Promise<{
+  retagCount: number;
+  retagged: number;
+}> {
+  // Consider decisions where pass1='APPROVED'. Their final may currently be
+  // APPROVED or DUPLICATE.
   const rows = await db
     .select({
       runId: decisions.runId,
@@ -147,7 +139,9 @@ export async function runPass2Global(): Promise<{ retagCount: number }> {
       uploadedAt: r.uploadedAt ?? null,
       invoiceNumber: toStringOrNull(pick(json, "invoice_number")),
       vendorName: toStringOrNull(pick(json, "vendor_name")),
-      vendorId: toStringOrNull(pick(json, "vendor_id")),
+      vendorId:
+        toStringOrNull(pick(json, "gst_number")) ??
+        toStringOrNull(pick(json, "vendor_id")),
       amount: toNumberOrNull(pick(json, "invoice_total")),
       poNumber: toStringOrNull(pick(json, "po_number")),
       invoiceDate: toStringOrNull(pick(json, "invoice_date")),
@@ -155,84 +149,95 @@ export async function runPass2Global(): Promise<{ retagCount: number }> {
     };
   });
 
-  // Union-find on duplicate-linked invoices.
-  const idxOf = new Map<string, number>();
-  invoices.forEach((inv, i) => idxOf.set(inv.runId, i));
-  const parent = invoices.map((_, i) => i);
-  const rank = invoices.map(() => 0);
-  const bestConf = new Map<string, number>(); // runId -> best confidence
+  // Sort by uploadedAt (earliest first). Nulls last.
+  invoices.sort((a, b) => {
+    const ta = a.uploadedAt?.getTime() ?? Number.MAX_SAFE_INTEGER;
+    const tb = b.uploadedAt?.getTime() ?? Number.MAX_SAFE_INTEGER;
+    return ta - tb;
+  });
 
-  const find = (x: number): number => {
-    while (parent[x] !== x) {
-      parent[x] = parent[parent[x]];
-      x = parent[x];
-    }
-    return x;
-  };
-  const union = (a: number, b: number): void => {
-    const ra = find(a);
-    const rb = find(b);
-    if (ra === rb) return;
-    if (rank[ra] < rank[rb]) parent[ra] = rb;
-    else if (rank[ra] > rank[rb]) parent[rb] = ra;
-    else {
-      parent[rb] = ra;
-      rank[ra] += 1;
-    }
-  };
+  const retagPlan: Array<{
+    runId: string;
+    duplicateOf: string;
+    confidence: number;
+  }> = [];
+  const markedDup = new Set<string>();
 
   for (let i = 0; i < invoices.length; i++) {
+    const A = invoices[i];
+    if (markedDup.has(A.runId)) continue;
     for (let j = i + 1; j < invoices.length; j++) {
-      const conf = duplicateConfidence(invoices[i], invoices[j]);
-      if (conf >= threshold) {
-        union(i, j);
-        const ki = invoices[i].runId;
-        const kj = invoices[j].runId;
-        if ((bestConf.get(ki) ?? 0) < conf) bestConf.set(ki, conf);
-        if ((bestConf.get(kj) ?? 0) < conf) bestConf.set(kj, conf);
+      const B = invoices[j];
+      if (markedDup.has(B.runId)) continue;
+
+      // Vendor signal - id equal OR name similarity >= 0.90.
+      const invIdA = normalizeVendorId(A.vendorId);
+      const invIdB = normalizeVendorId(B.vendorId);
+      const vendorIdOk = !!invIdA && !!invIdB && invIdA === invIdB;
+      const vendorNameOk =
+        vendorNameSim(A.vendorName, B.vendorName) >= 0.9;
+      const vendorMatch = vendorIdOk || vendorNameOk;
+
+      // Invoice number equal (trim/lower).
+      const invA = A.invoiceNumber?.trim().toLowerCase() ?? null;
+      const invB = B.invoiceNumber?.trim().toLowerCase() ?? null;
+      const invoiceNumberMatch = !!invA && !!invB && invA === invB;
+
+      // PO number equal.
+      const poA = A.poNumber?.trim().toLowerCase() ?? null;
+      const poB = B.poNumber?.trim().toLowerCase() ?? null;
+      const poMatch = !!poA && !!poB && poA === poB;
+
+      // Amount within 0.1%.
+      let amountMatchStrict = false;
+      let amountMatchLoose = false;
+      if (
+        A.amount !== null &&
+        B.amount !== null &&
+        A.amount !== 0 &&
+        B.amount !== 0
+      ) {
+        const denom = Math.max(Math.abs(A.amount), Math.abs(B.amount));
+        const rel = Math.abs(A.amount - B.amount) / denom;
+        amountMatchStrict = rel <= 0.001;
+        amountMatchLoose = rel <= 0.005;
+      }
+
+      // Primary rule - ALL four signals must match, all four inputs non-null.
+      if (
+        vendorMatch &&
+        invoiceNumberMatch &&
+        poMatch &&
+        amountMatchStrict
+      ) {
+        retagPlan.push({
+          runId: B.runId,
+          duplicateOf: A.runId,
+          confidence: 1.0,
+        });
+        markedDup.add(B.runId);
+        continue;
+      }
+
+      // Secondary fingerprint - if invoice_number missing on either side,
+      // use vendor + po + date equal + amount within 0.5%.
+      if (!invA || !invB) {
+        const dateMatch =
+          !!A.invoiceDate &&
+          !!B.invoiceDate &&
+          A.invoiceDate.trim() === B.invoiceDate.trim();
+        if (vendorMatch && poMatch && dateMatch && amountMatchLoose) {
+          retagPlan.push({
+            runId: B.runId,
+            duplicateOf: A.runId,
+            confidence: 0.85,
+          });
+          markedDup.add(B.runId);
+        }
       }
     }
   }
 
-  // Group members and find the earliest-uploaded in each group.
-  const groups = new Map<number, number[]>();
-  for (let i = 0; i < invoices.length; i++) {
-    const r = find(i);
-    if (!groups.has(r)) groups.set(r, []);
-    groups.get(r)!.push(i);
-  }
-
-  const retagPlan: Array<{
-    runId: string;
-    duplicateOf: string | null;
-    confidence: number;
-  }> = [];
-
-  for (const members of groups.values()) {
-    if (members.length < 2) continue;
-    // Earliest by uploadedAt.
-    let earliest = members[0];
-    for (const m of members) {
-      const cur = invoices[m].uploadedAt?.getTime() ?? Infinity;
-      const best = invoices[earliest].uploadedAt?.getTime() ?? Infinity;
-      if (cur < best) earliest = m;
-    }
-    const earliestRunId = invoices[earliest].runId;
-    for (const m of members) {
-      const inv = invoices[m];
-      const conf = bestConf.get(inv.runId) ?? 0;
-      // Every member is retagged DUPLICATE. Earliest row has duplicate_of=null;
-      // later rows point back to the earliest.
-      retagPlan.push({
-        runId: inv.runId,
-        duplicateOf: m === earliest ? null : earliestRunId,
-        confidence: conf,
-      });
-    }
-  }
-
-  // Apply retag + revert atomically so concurrent Pass 2 runs never observe
-  // intermediate state.
   await db.transaction(async (tx) => {
     for (const p of retagPlan) {
       await tx
@@ -246,7 +251,7 @@ export async function runPass2Global(): Promise<{ retagCount: number }> {
         .where(eq(decisions.runId, p.runId));
     }
 
-    // Also revert previously DUPLICATE rows that no longer match to APPROVED.
+    // Revert previously-DUPLICATE rows whose partner is no longer matched.
     const retaggedIds = new Set(retagPlan.map((p) => p.runId));
     const previouslyDup = await tx
       .select({ runId: decisions.runId })
@@ -282,5 +287,5 @@ export async function runPass2Global(): Promise<{ retagCount: number }> {
     });
   }
 
-  return { retagCount: retagPlan.length };
+  return { retagCount: retagPlan.length, retagged: retagPlan.length };
 }

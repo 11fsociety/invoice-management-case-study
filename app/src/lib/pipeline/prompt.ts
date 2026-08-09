@@ -56,6 +56,10 @@ export async function buildPrompt(): Promise<{
     )
     .nullable();
 
+  // Always-included fields for the credit-note edge case.
+  shape.document_type = z.enum(["INVOICE", "CREDIT_NOTE"]).nullable();
+  shape.references_invoice_number = z.string().nullable();
+
   const zodSchema = z.object(shape) as ExtractionSchema;
 
   const descriptions = rows
@@ -68,8 +72,10 @@ export async function buildPrompt(): Promise<{
     "For any field not present in the invoice, return null (do not guess).",
     "Return line_items as structured objects; also return line_items_raw as the verbatim string of the line-item section from the invoice.",
     "Line items are captured for audit only in this system - they do not affect the decision.",
-    "`invoice_total` should be the grand total payable including taxes.",
+    "`invoice_total` should be the grand total payable including taxes. For credit notes / credit memos, return it as a NEGATIVE number.",
     "`currency` should be the 3-letter ISO code (INR, USD, EUR).",
+    "Set `document_type`='CREDIT_NOTE' if the document is a credit note, credit memo, or has a negative total; otherwise 'INVOICE'.",
+    "Set `references_invoice_number` to any invoice number this credit note refers to (or null).",
     "Field descriptions:",
     descriptions,
   ].join("\n");

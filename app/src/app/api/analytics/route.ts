@@ -209,35 +209,33 @@ export async function GET() {
     .map(([currency, v]) => ({ currency, count: v.count, total: v.total }))
     .sort((a, b) => b.count - a.count);
 
-  // Chart 5 - latency by mode.
-  const modeLatencies = new Map<"text" | "vision", number[]>();
-  modeLatencies.set("text", []);
-  modeLatencies.set("vision", []);
+  // Chart 5 - PDF extraction latency (single mode now that we send the whole
+  // PDF straight to Bedrock).
+  const pdfLatencies: number[] = [];
   for (const r of rows) {
     if (r.latencyMs === null || r.latencyMs === undefined) continue;
-    const mode: "text" | "vision" =
-      r.extractionMode === "vision" ? "vision" : "text";
-    modeLatencies.get(mode)!.push(r.latencyMs);
+    pdfLatencies.push(r.latencyMs);
   }
   const latency: Array<{
-    mode: "text" | "vision";
+    mode: "pdf";
     avg_ms: number;
     p95_ms: number;
     count: number;
-  }> = (["text", "vision"] as const).map((mode) => {
-    const arr = modeLatencies.get(mode) ?? [];
-    if (arr.length === 0) {
-      return { mode, avg_ms: 0, p95_ms: 0, count: 0 };
+  }> = (() => {
+    if (pdfLatencies.length === 0) {
+      return [{ mode: "pdf", avg_ms: 0, p95_ms: 0, count: 0 }];
     }
-    const sum = arr.reduce((a, b) => a + b, 0);
-    const sorted = [...arr].sort((a, b) => a - b);
-    return {
-      mode,
-      avg_ms: Math.round(sum / arr.length),
-      p95_ms: Math.round(quantile(sorted, 0.95)),
-      count: arr.length,
-    };
-  });
+    const sum = pdfLatencies.reduce((a, b) => a + b, 0);
+    const sorted = [...pdfLatencies].sort((a, b) => a - b);
+    return [
+      {
+        mode: "pdf",
+        avg_ms: Math.round(sum / pdfLatencies.length),
+        p95_ms: Math.round(quantile(sorted, 0.95)),
+        count: pdfLatencies.length,
+      },
+    ];
+  })();
 
   // Chart 6 - tolerance histogram on amount_delta_pct.
   const toleranceCounts = new Map<string, number>(
