@@ -1,5 +1,9 @@
 packages:
   - "!/*"
+minimumReleaseAge: 0
+strictDepBuilds: false
+onlyBuiltDependencies:
+  - esbuild
 allowBuilds:
   sharp: false
   unrs-resolver: false
