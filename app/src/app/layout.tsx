@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Zamp Invoice Ops",
-  description: "Zamp AI Solutions Associate case study - invoice processing",
+  title: "Invoice Ops",
+  description: "Invoice Management Case Study - AP invoice processing platform",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

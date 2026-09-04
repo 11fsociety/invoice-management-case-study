@@ -1,4 +1,4 @@
-# PRD - Zamp AI Solutions Associate Case Study (PS-1)
+# PRD - Invoice Management Case Study (PS-1)
 ## Invoice Processing - From PDF to Decision
 
 **Author:** Asmit Dash
@@ -18,7 +18,7 @@ That separation is the central architectural principle of this PRD. Every module
 
 ---
 
-## 1. Problem Statement (verbatim from Zamp candidate guide)
+## 1. Problem Statement
 
 > **PS-1 - FINANCE / AP**
 > **Invoice processing - from PDF to decision**
@@ -881,7 +881,7 @@ Reason:
  exceeds the 0.75 duplicate threshold."
 ```
 
-This satisfies the Zamp brief's explicit requirement: *"produces a clear, reasoned decision as output - with everything that happened in between visible."*
+This satisfies the brief's explicit requirement: *"produces a clear, reasoned decision as output - with everything that happened in between visible."*
 
 ---
 

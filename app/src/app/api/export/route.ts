@@ -60,7 +60,7 @@ export async function GET() {
   const poById = new Map(allPos.map((p) => [p.id, p]));
 
   const wb = new ExcelJS.Workbook();
-  wb.creator = "Zamp ASA";
+  wb.creator = "Invoice Ops";
   wb.created = new Date();
 
   const buckets: Array<keyof typeof bucketColors> = [
@@ -118,7 +118,7 @@ export async function GET() {
   }
 
   const arrayBuffer = (await wb.xlsx.writeBuffer()) as ArrayBuffer;
-  const filename = `zamp-asa-export-${new Date().toISOString().slice(0, 10)}.xlsx`;
+  const filename = `invoice-export-${new Date().toISOString().slice(0, 10)}.xlsx`;
 
   return new NextResponse(new Uint8Array(arrayBuffer), {
     headers: {

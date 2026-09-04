@@ -55,7 +55,7 @@ export function AppShell({ email, role, children }: Props) {
     <div className="flex min-h-screen">
       <aside className="flex w-60 flex-col border-r border-[var(--border)] bg-[var(--muted)]/40">
         <div className="border-b border-[var(--border)] px-6 py-4">
-          <div className="text-sm font-semibold">Zamp Invoice Ops</div>
+          <div className="text-sm font-semibold">Invoice Ops</div>
           <div className="text-xs text-[var(--muted-foreground)]">v0.2</div>
         </div>
         <nav className="flex-1 space-y-1 px-3 py-4">
@@ -96,7 +96,7 @@ export function AppShell({ email, role, children }: Props) {
       </aside>
       <div className="flex flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-[var(--border)] px-6 py-3">
-          <div className="text-sm font-semibold">Zamp Invoice Ops</div>
+          <div className="text-sm font-semibold">Invoice Ops</div>
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 text-sm">
               <span className="text-[var(--muted-foreground)]">{email}</span>

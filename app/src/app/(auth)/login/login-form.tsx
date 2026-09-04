@@ -82,7 +82,7 @@ export function LoginForm() {
   return (
     <Card className="w-full max-w-md">
       <CardHeader className="space-y-2 text-center">
-        <CardTitle className="text-2xl">Zamp Invoice Ops</CardTitle>
+        <CardTitle className="text-2xl">Invoice Ops</CardTitle>
         <CardDescription>Sign in to continue</CardDescription>
       </CardHeader>
       <form onSubmit={handleSubmit(onSubmit)}>

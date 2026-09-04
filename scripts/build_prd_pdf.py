@@ -7,7 +7,7 @@ Build PRD.pdf from PRD.md and append the 20 sample invoice PDFs at the end.
   italics (*italic*), horizontal rules (---), and tables (github-flavour).
 - After the PRD body pages, appends INV-0001.pdf through INV-0020.pdf verbatim.
 
-Output: D:\\codezzz\\Claude\\zamp-asa\\PRD.pdf
+Output: D:\\codezzz\\Claude\\invoice-management-case-study\\PRD.pdf
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from reportlab.platypus import (
 from reportlab.lib.enums import TA_LEFT
 from pypdf import PdfWriter, PdfReader
 
-ROOT = Path(r"D:\codezzz\Claude\zamp-asa")
+ROOT = Path(r"D:\codezzz\Claude\invoice-management-case-study")
 MD_PATH = ROOT / "PRD.md"
 BODY_PDF = ROOT / "PRD_body.pdf"
 FINAL_PDF = ROOT / "PRD.pdf"
@@ -227,7 +227,7 @@ def build_body_pdf(md_text: str, out_path: Path):
         pagesize=A4,
         leftMargin=18*mm, rightMargin=18*mm,
         topMargin=18*mm, bottomMargin=18*mm,
-        title="Zamp ASA Case Study PRD",
+        title="Invoice Management Case Study PRD",
         author="Asmit Dash",
     )
     flow = render(md_text)

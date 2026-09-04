@@ -1,5 +1,5 @@
 """
-Generate 9 edge-case invoice PDFs (INV-0021 through INV-0029) for the Zamp ASA
+Generate 9 edge-case invoice PDFs (INV-0021 through INV-0029) for the Invoice Management
 case study. Reuses the layout helpers from generate_invoices.py. Idempotent -
 skips PDFs that already exist. Also appends 4 new PO rows to po_master.xlsx
 and po_master.csv.
@@ -33,7 +33,7 @@ from generate_invoices import (  # type: ignore
     draw_boxed,
 )
 
-OUT_DIR = Path(r"D:\codezzz\Claude\zamp-asa\sample-invoices")
+OUT_DIR = Path(r"D:\codezzz\Claude\invoice-management-case-study\sample-invoices")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 

@@ -26,7 +26,7 @@ const AUDITOR_ID = "85e15b4c-29ea-472e-9328-182de0347f36";
 
 const SAMPLES_DIR =
   process.env.SAMPLES_DIR ??
-  "D:\\codezzz\\Claude\\zamp-asa\\sample-invoices";
+  "D:\\codezzz\\Claude\\invoice-management-case-study\\sample-invoices";
 
 const PO_XLSX = join(SAMPLES_DIR, "po_master.xlsx");
 const INVOICE_COUNT = Number(process.env.INVOICE_COUNT ?? 29);

@@ -1,9 +1,9 @@
 """
-Generate 20 varied sample invoice PDFs for the Zamp ASA case study.
+Generate 20 varied sample invoice PDFs for the Invoice Management case study.
 Each PDF has a distinct layout template so the extraction pipeline
 is exercised across realistic vendor formats.
 
-Output: D:\\codezzz\\Claude\\zamp-asa\\sample-invoices\\INV-XXXX.pdf
+Output: D:\\codezzz\\Claude\\invoice-management-case-study\\sample-invoices\\INV-XXXX.pdf
 Also writes po_master.xlsx with matching PO rows.
 """
 
@@ -21,7 +21,7 @@ from reportlab.pdfgen import canvas
 from reportlab.platypus import Table, TableStyle, Paragraph, SimpleDocTemplate, Spacer
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT, TA_CENTER
 
-OUT_DIR = Path(r"D:\codezzz\Claude\zamp-asa\sample-invoices")
+OUT_DIR = Path(r"D:\codezzz\Claude\invoice-management-case-study\sample-invoices")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 

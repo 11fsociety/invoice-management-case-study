@@ -16,7 +16,7 @@ const AUDITOR_ID = "85e15b4c-29ea-472e-9328-182de0347f36";
 
 const SAMPLES_DIR =
   process.env.SAMPLES_DIR ??
-  "D:\\codezzz\\Claude\\zamp-asa\\sample-invoices";
+  "D:\\codezzz\\Claude\\invoice-management-case-study\\sample-invoices";
 
 const INVOICE_NAME = process.env.INVOICE_NAME ?? "INV-0001.pdf";
 
